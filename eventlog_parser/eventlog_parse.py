@@ -2,6 +2,9 @@ import csv
 import os
 import sys
 import glob
+import InputLog
+import pandas as pd
+
 
 EVENT_LOGIN = "4624"
 EVENT_TGT = "4768"
@@ -20,9 +23,19 @@ TARGET_EVT=[EVENT_TGT,EVENT_ST,EVENT_PRIV,EVENT_PROCESS,
 
 write=None
 
-def preds(row):
+df = pd.DataFrame(data=None, index=None,
+                  columns=["eventid", "accountname", "clientaddr","id"], dtype=None, copy=False)
+
+cnt=0
+id=""
+
+idlist=set()
+
+def parse_event(org_row):
+    global cnt,id,idlist
     #print(row)
 
+    row = [i.strip('\t') for i in org_row]
     datetime = row[1]
     eventid = row[3]
     msg=row[5]
@@ -34,8 +47,16 @@ def preds(row):
     processname = ""
     objectname = ""
     securityid=""
+    if (eventid == EVENT_ST):
+        cnt=cnt+1
+
     if (eventid in TARGET_EVT):
+
         item_account = [s for s in item if 'Account Name' in s]
+
+        if len(item_account) == 0:
+            item_account = [s for s in item if 'Logon Account' in s]
+
         org_accountname = item_account[0].split(":")[1]
         if eventid == EVENT_LOGIN:
             org_accountname = item_account[1].split(":")[1]
@@ -49,7 +70,8 @@ def preds(row):
         if len(item_clientaddr) == 0:
             item_clientaddr = [s for s in item if 'Source Workstation' in s]
         if(len(item_clientaddr)>=1):
-            clientaddr = item_clientaddr[0].split(":")[1]
+            clientaddrs=item_clientaddr[0].split(":")
+            clientaddr = clientaddrs[len(clientaddrs)-1]
 
         item_service=""
         item_service = [s for s in item if 'Service Name' in s]
@@ -99,31 +121,71 @@ def preds(row):
     if sharedname != None:
         sharedname = sharedname.strip("'")
         sharedname = sharedname.lower()
+    id = ""
+    id=(accountname+clientaddr+str(id)).strip()
+    id=id.replace(" ","").replace("\t","")
+    idlist.add(id)
 
-
-    writer.writerow([datetime, eventid, accountname, clientaddr, servicename, processname, objectname, sharedname])
-
+    inputLog = InputLog.InputLog(datetime, eventid, accountname, clientaddr, servicename, processname, objectname, sharedname, securityid)
+    create_input_DL(inputLog)
     return
+
+def create_input_DL(inputLog):
+    global df,id
+    eventid=inputLog.get_eventid()
+    accountname=inputLog.get_accountname()
+    clientaddr=inputLog.get_clientaddr()
+
+    if not clientaddr:
+        logs = df[(df.accountname == inputLog.get_accountname())
+                                    & (df.eventid == EVENT_ST | df.eventid == EVENT_LOGIN |df.eventid == EVENT_NTLM)
+                                    ]
+        latestlog = logs.tail(1)
+        if (len(latestlog) > 0):
+            clientaddr = latestlog.clientaddr.values[0]
+            inputLog.set_clientaddr(clientaddr)
+
+    series = pd.Series([eventid, accountname, clientaddr,id], index=df.columns)
+    df = df.append(series, ignore_index=True)
+    #writer.writerow([eventid, accountname, clientaddr])
+    return
+
+def greoup_event():
+    global df,cnt, id,idlist
+
+    f=open(RESULT_FILE, 'a')
+    writer = csv.writer(f)
+    writer.writerow(["eventid", "result","id"])
+
+    for id in idlist:
+        logs = df[(df.id == id)]
+        #row=logs['eventid']
+        events=""
+        for index, row in logs.iterrows():
+            events=events+row['eventid']+" "
+        writer.writerow([events,"normal",id])
+    df.to_csv("df.csv")
 
 def read_csv(inputdir):
 
     files = glob.glob(inputdir+"/*.csv")
     for file in files:
-        #print(file)
         with open(file, 'r') as f:
             reader = csv.reader(f)
             header = next(reader)
             rows=reversed(list(reader))
             for row in rows:
-                if row:
-                    print(row)
-                    preds(row)
+                try:
+                 if row:
+                     parse_event(row)
+                except Exception as err:
+                    #print(row)
+                    print(err)
 
 if __name__ == '__main__':
     if(os.path.isfile(RESULT_FILE)):
         os.remove(RESULT_FILE)
-    f=open(RESULT_FILE, 'a')
-    writer = csv.writer(f)
-    writer.writerow(
-            ["datetime", "eventid", "accountname", "clientaddr", "servicename", "processname", "objectname", "sharedname"])
     read_csv(sys.argv[1])
+    #print(df)
+    df = df.sort_index(ascending=False)
+    greoup_event()
